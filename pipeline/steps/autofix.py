@@ -27,13 +27,88 @@ Bẫy cần nghĩ tới (có test cho từng cái)
 
 Gợi ý: `yaml.safe_load / safe_dump`.
 """
-from collections import defaultdict  # noqa: F401
+from collections import defaultdict
 
-import yaml  # noqa: F401
+import yaml
 
-from ..common import ERROR, parse_yolo_line  # noqa: F401
+from ..common import ERROR, parse_yolo_line
+
+DROP_LINE = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+REMOVE_IMAGE = {"DUP_IMAGE_EXACT", "DUP_IMAGE_NEAR", "LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+EPS = 1e-6
+
+
+def _fix(image, line, action, before, after):
+    return {"image": image, "line": line, "action": action, "before": before, "after": after}
+
+
+def _clip(text):
+    """Cắt box về trong [0,1]. Trả về dòng mới, hoặc None nếu box không còn diện tích."""
+    c, x, y, w, h = parse_yolo_line(text)
+    x1, x2 = max(0.0, x - w / 2), min(1.0, x + w / 2)
+    y1, y2 = max(0.0, y - h / 2), min(1.0, y + h / 2)
+    nw, nh = x2 - x1, y2 - y1
+    if nw <= EPS or nh <= EPS:
+        return None
+    return f"{c} {(x1 + x2) / 2:.6f} {(y1 + y2) / 2:.6f} {nw:.6f} {nh:.6f}"
 
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    errors = sorted((i for i in issues if i.severity == ERROR),
+                    key=lambda i: (i.image, i.line or 0, i.code))
+    fixes = []
+
+    # 1) Xoá ảnh (+ nhãn): mỗi ảnh một fix, dù có nhiều lỗi
+    removed = set()
+    for stem in sorted({i.image for i in errors if i.code in REMOVE_IMAGE}):
+        img = ds.image_path(stem)
+        if img is None:                       # ảnh đã bị xoá từ trước: bỏ qua êm
+            continue
+        img.unlink()
+        if ds.label_path(stem).exists():
+            ds.label_path(stem).unlink()
+        removed.add(stem)
+        fixes.append(_fix(stem, None, "remove_image", img.name, "(đã xoá)"))
+
+    # 2) Đổi tên lớp trong data.yaml
+    if any(i.code == "BAD_CLASS_NAME" for i in errors):
+        d = {}
+        if ds.yaml_path.exists():
+            d = yaml.safe_load(ds.yaml_path.read_text(encoding="utf-8")) or {}
+        before = list(ds.yaml_names().values())
+        d["names"] = list(cfg["classes"])
+        ds.yaml_path.write_text(yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        fixes.append(_fix("data.yaml", None, "rename_classes", str(before), str(list(cfg["classes"]))))
+
+    # 3) Thiếu file nhãn: KHÔNG tạo file, chuyển người gán
+    for stem in sorted({i.image for i in errors if i.code == "MISSING_LABEL_FILE"} - removed):
+        if not ds.label_path(stem).exists():
+            fixes.append(_fix(stem, None, "needs_label", "(không có file)", "chuyển người gán"))
+
+    # 4) Lỗi theo dòng: gom theo file, ghi lại MỘT lần (số dòng trong issue là số dòng GỐC)
+    per_image = defaultdict(lambda: defaultdict(set))      # stem -> số dòng -> tập mã lỗi
+    for i in errors:
+        if i.line is not None and i.image not in removed and (i.code in DROP_LINE or i.code == "BOX_OUT_OF_IMAGE"):
+            per_image[i.image][i.line].add(i.code)
+
+    for stem in sorted(per_image):
+        path = ds.label_path(stem)
+        if not path.exists():
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        new = []
+        for no, text in enumerate(raw, 1):                  # enumerate trên TOÀN BỘ dòng, kể cả dòng trống
+            codes = per_image[stem].get(no)
+            if not codes:
+                new.append(text)
+            elif codes & DROP_LINE:                         # xoá thắng cắt: chỉ 1 fix drop_line
+                fixes.append(_fix(stem, no, "drop_line", text, "(đã xoá)"))
+            else:                                           # chỉ còn BOX_OUT_OF_IMAGE
+                clipped = _clip(text)
+                if clipped is None:
+                    fixes.append(_fix(stem, no, "drop_line", text, "(đã xoá)"))
+                else:
+                    new.append(clipped)
+                    fixes.append(_fix(stem, no, "clip_box", text, clipped))
+        path.write_text("".join(ln + "\n" for ln in new), encoding="utf-8")
+    return fixes
