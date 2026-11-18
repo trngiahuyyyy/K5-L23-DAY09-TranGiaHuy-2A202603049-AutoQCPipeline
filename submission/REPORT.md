@@ -33,4 +33,12 @@ TODO(học viên): chênh mAP50 (clean − raw) so với **độ lệch chuẩn 
 ## 6. Quyết định và ghi chú AI
 TODO(học viên): (a) quyết định cuối; nếu Hold/Rework cần làm gì để thành Release? (b) Dùng AI viết code? Ghi 3 dòng: prompt chính, cách bạn kiểm code AI, 1 lần AI sai. Không dùng: ghi "không dùng".
 
+
+
+b/  Prompt chính : Dán docstring của label_format.py và file tests/test_label_format.py vào AI, nhờ viết hàm run
+    Cách kiểm:
+        C:\cvat\K5-L23-DAY09-2A202603049-AutoQCPipeline>python -m pytest tests/test_label_format.py -q
+        ..............                                                                                                   [100%]
+        14 passed in 0.55s
+    Lần AI sai: đoán ds.stems() không tồn tại và còn thêm strip() và isfinite thừa vì xem common.py
 *(Thưởng +2, tùy chọn)* CVAT: lọc `width < 20`, ảnh/số box khớp, đối chiếu `BOX_TINY` (xem docs/CVAT_FILTER.md), 1 câu về `can_review`.
